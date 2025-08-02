@@ -14,23 +14,31 @@ import minitouch
 from cv import Finder
 from pynput import keyboard
 import test
+from Utils import counter,ServerChan
 
 
 class pictureOCR(QThread):
 
     signal = pyqtSignal(int)
-    
+    timeout_signal=pyqtSignal()
+    send_key = "SCT291449TTW7hQ0QFBL9ibAQ9NVFSIgJE"
+    notifier = ServerChan(send_key)
     def __init__(self, *args, **kwargs):
         super(pictureOCR, self).__init__()
         self.main_win = kwargs.get('main_win')
         self.signal.connect(self.refresh)
-        self.hwnd=win32gui.FindWindow(None, 'MuMu模拟器12')
+        self.timeout_signal.connect(self.timeout)
+        self.hwnd = self.main_win.windowSelector.currentData()
+        # self.hwnd=win32gui.FindWindow(None, 'MuMu模拟器12')
         print(self.hwnd)
         self.isPause = False
         self.isCancel=False
         self.cond = QWaitCondition()
-        self.mutex = QMutex()  
+        self.mutex = QMutex()
+        self.counter = counter()
         self.res = None
+        self.last_action_time = time.time()
+        self.timeout_seconds = 60  # 超时响应时间
         if not self.hwnd:
             self.main_win.btnBegin.setEnabled(True)
             self.main_win.btnPause.setEnabled(False)
@@ -54,14 +62,14 @@ class pictureOCR(QThread):
         print("线程取消")
         
         self.isCancel=True
-        self.sock.close()
+        
 
 
     # @test_time
     def run(self):
         minitouch.setup_minitouch()
         self.sock = minitouch.connect_to_minitouch()
-        m=0
+        self.counter.clear()
         status=1
         i=True
         selected = False
@@ -77,10 +85,15 @@ class pictureOCR(QThread):
             finder_end=Finder('over0303.png')
         while True:
             self.mutex.lock()
+            if time.time() - self.last_action_time > self.timeout_seconds:
+                print("超时未响应，自动取消任务")
+                self.timeout_signal.emit()
+                self.cancel()
             if self.isPause:
                 self.cond.wait(self.mutex)
             if self.isCancel:
-                self.signal.emit(m)
+                self.signal.emit(self.counter.show())
+                self.sock.close()
                 break
 
             screen=QApplication.primaryScreen()
@@ -112,7 +125,8 @@ class pictureOCR(QThread):
                         i=True
                         # print("x=",self.res.match_loc[0],"y=",self.res.match_loc[1])
                         minitouch.send_touch(self.sock,y=self.res.match_loc[0]+random.randint(20,50),x=540-self.res.match_loc[1]+random.randint(20,50))
-
+                        self.last_action_time = time.time()
+                        
                             
 
                 elif status==1:
@@ -121,18 +135,24 @@ class pictureOCR(QThread):
             self.start_time=time.time()
             if self.res.match_loc:
                 if i:
-                    m+=1
+                    self.counter.plus()
                     i=False
                 minitouch.send_touch(self.sock,y=random.randint(810,840),x=260+random.randint(20,40))
+                self.last_action_time = time.time()
                 selected = False
                     
 
                         
-            self.signal.emit(m)
+            self.signal.emit(self.counter.show())
             self.mutex.unlock()
     def refresh(self, m):
         self.main_win.edit.setText(str(m))
         self.main_win.label.setPixmap(test.ToPixmap2(self.res.image))
+    def timeout(self):
+        self.notifier.send("超时异常", "脚本超时异常")
+        self.main_win.btnBegin.setEnabled(True)
+        self.main_win.btnCancel.setEnabled(False)
+        self.main_win.btnPause.setEnabled(False)
 class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self, parent=None):
@@ -147,7 +167,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.label.setScaledContents(True)
         self.label.setFixedSize(640,360)
+        self.windowSelector = QComboBox(self)
+        self.windowSelector.move(100, 380)
+        self.windowSelector.resize(300, 25)
 
+        self.refreshWindowList()
 
 
         self.btnBegin=QPushButton("开始",self)
@@ -218,7 +242,20 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.btnCancel.click()
     
-        
+    def refreshWindowList(self):
+        self.window_list = []
+
+        def enum_callback(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if "模拟器" in title:  # 根据你需求改关键词
+                    self.window_list.append((title, hwnd))
+
+        win32gui.EnumWindows(enum_callback, None)
+
+        self.windowSelector.clear()
+        for title, hwnd in self.window_list:
+            self.windowSelector.addItem(title, userData=hwnd)
 
 
 if __name__ == '__main__':
